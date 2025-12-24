@@ -1,5 +1,8 @@
 fastapi
 uvicorn
 requests
-solana
 python-dotenv
+
+solana
+solders
+base58
