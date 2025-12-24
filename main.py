@@ -26,22 +26,8 @@ app.add_middleware(
 )
 
 # ========================
-# Environment variables
+# Constants
 # ========================
-RPC = os.environ.get("SOLANA_RPC")
-MINT_ADDRESS = Pubkey.from_string(os.environ.get("TOKEN_MINT"))
-AIRDROP_SECRET_B58 = os.environ.get("AIRDROP_PRIVATE_KEY_B58")
-
-if not RPC or not AIRDROP_SECRET_B58:
-    raise RuntimeError("Missing required environment variables")
-
-client = Client(RPC)
-
-airdrop_keypair = Keypair.from_bytes(
-    base58.b58decode(AIRDROP_SECRET_B58)
-)
-AIRDROP_PUBKEY = airdrop_keypair.pubkey()
-
 TOKEN_2022_PROGRAM_ID = Pubkey.from_string(
     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 )
@@ -69,53 +55,95 @@ def find_ata(owner: Pubkey, mint: Pubkey) -> Pubkey:
 # ========================
 @app.post("/airdrop")
 async def airdrop(req: WalletRequest):
+    # ---- Load env vars SAFELY ----
+    RPC = os.environ.get("SOLANA_RPC")
+    TOKEN_MINT = os.environ.get("TOKEN_MINT")
+    AIRDROP_SECRET_B58 = os.environ.get("AIRDROP_PRIVATE_KEY_B58")
+
+    if not RPC or not TOKEN_MINT or not AIRDROP_SECRET_B58:
+        raise HTTPException(
+            status_code=500,
+            detail="Server misconfigured (missing env vars)"
+        )
+
+    client = Client(RPC)
+
     try:
+        MINT_ADDRESS = Pubkey.from_string(TOKEN_MINT)
         receiver_pubkey = Pubkey.from_string(req.wallet)
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid wallet address")
+        raise HTTPException(status_code=400, detail="Invalid wallet or mint address")
+
+    # ---- Load airdrop keypair ----
+    try:
+        airdrop_keypair = Keypair.from_bytes(
+            base58.b58decode(AIRDROP_SECRET_B58)
+        )
+    except Exception:
+        raise HTTPException(status_code=500, detail="Invalid airdrop private key")
+
+    AIRDROP_PUBKEY = airdrop_keypair.pubkey()
 
     sender_ata = find_ata(AIRDROP_PUBKEY, MINT_ADDRESS)
     receiver_ata = find_ata(receiver_pubkey, MINT_ADDRESS)
 
-    # Fetch decimals from chain
+    # ---- Check sender ATA exists ----
+    sender_info = client.get_account_info(sender_ata).value
+    if sender_info is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Airdrop wallet has no token account"
+        )
+
+    # ---- Get decimals ----
     mint_info = client.get_token_supply(MINT_ADDRESS).value
     decimals = mint_info.decimals
 
-    raw_amount = 1 * (10 ** decimals)  # 1 token
+    raw_amount = 1 * (10 ** decimals)
+
+    # ---- Check balance ----
+    bal = client.get_token_account_balance(sender_ata).value.amount
+    if int(bal) < raw_amount:
+        raise HTTPException(
+            status_code=400,
+            detail="Airdrop exhausted"
+        )
 
     instructions = []
 
-    # Create receiver ATA if missing
+    # ---- Create receiver ATA if missing ----
     if client.get_account_info(receiver_ata).value is None:
-        create_ata_ix = Instruction(
-            program_id=ASSOCIATED_TOKEN_PROGRAM_ID,
-            accounts=[
-                AccountMeta(AIRDROP_PUBKEY, True, True),
-                AccountMeta(receiver_ata, False, True),
-                AccountMeta(receiver_pubkey, False, False),
-                AccountMeta(MINT_ADDRESS, False, False),
-                AccountMeta(Pubkey.from_string("11111111111111111111111111111111"), False, False),
-                AccountMeta(TOKEN_2022_PROGRAM_ID, False, False),
-                AccountMeta(Pubkey.from_string("SysvarRent111111111111111111111111111111111"), False, False),
-            ],
-            data=b""
+        instructions.append(
+            Instruction(
+                program_id=ASSOCIATED_TOKEN_PROGRAM_ID,
+                accounts=[
+                    AccountMeta(AIRDROP_PUBKEY, True, True),
+                    AccountMeta(receiver_ata, False, True),
+                    AccountMeta(receiver_pubkey, False, False),
+                    AccountMeta(MINT_ADDRESS, False, False),
+                    AccountMeta(Pubkey.from_string("11111111111111111111111111111111"), False, False),
+                    AccountMeta(TOKEN_2022_PROGRAM_ID, False, False),
+                    AccountMeta(Pubkey.from_string("SysvarRent111111111111111111111111111111111"), False, False),
+                ],
+                data=b""
+            )
         )
-        instructions.append(create_ata_ix)
 
-    # TransferChecked
-    transfer_ix = Instruction(
-        program_id=TOKEN_2022_PROGRAM_ID,
-        accounts=[
-            AccountMeta(sender_ata, False, True),
-            AccountMeta(MINT_ADDRESS, False, False),
-            AccountMeta(receiver_ata, False, True),
-            AccountMeta(AIRDROP_PUBKEY, True, False),
-        ],
-        data=struct.pack("<BQB", 12, raw_amount, decimals)
+    # ---- TransferChecked ----
+    instructions.append(
+        Instruction(
+            program_id=TOKEN_2022_PROGRAM_ID,
+            accounts=[
+                AccountMeta(sender_ata, False, True),
+                AccountMeta(MINT_ADDRESS, False, False),
+                AccountMeta(receiver_ata, False, True),
+                AccountMeta(AIRDROP_PUBKEY, True, False),
+            ],
+            data=struct.pack("<BQB", 12, raw_amount, decimals)
+        )
     )
 
-    instructions.append(transfer_ix)
-
+    # ---- Send tx ----
     recent = client.get_latest_blockhash().value.blockhash
 
     tx = Transaction.new_signed_with_payer(
@@ -128,7 +156,7 @@ async def airdrop(req: WalletRequest):
     sig = client.send_raw_transaction(bytes(tx)).value
 
     return {
-        "message": "Airdrop successful!",
+        "message": "Airdrop successful",
         "wallet": req.wallet,
         "signature": sig,
         "explorer": f"https://explorer.solana.com/tx/{sig}"
