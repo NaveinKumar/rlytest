@@ -3,4 +3,3 @@ uvicorn
 solana
 solders
 base58
-python-dotenv
