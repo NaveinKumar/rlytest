@@ -26,31 +26,21 @@ app.add_middleware(
 )
 
 # ========================
-# Load ENV VARS (ONCE)
+# ENV VARS (LOAD ONCE)
 # ========================
-RPC = os.environ.get("SOLANA_RPC")
-TOKEN_MINT = os.environ.get("TOKEN_MINT")
-AIRDROP_PRIVATE_KEY_B58 = os.environ.get("AIRDROP_PRIVATE_KEY_B58")
+SOLANA_RPC = os.getenv("SOLANA_RPC")
+TOKEN_MINT = os.getenv("TOKEN_MINT")
+AIRDROP_PRIVATE_KEY_B58 = os.getenv("AIRDROP_PRIVATE_KEY_B58")
 
-if not RPC or not TOKEN_MINT or not AIRDROP_PRIVATE_KEY_B58:
+if not SOLANA_RPC or not TOKEN_MINT or not AIRDROP_PRIVATE_KEY_B58:
     raise RuntimeError(
-        f"Missing env vars: "
-        f"SOLANA_RPC={bool(RPC)}, "
-        f"TOKEN_MINT={bool(TOKEN_MINT)}, "
-        f"AIRDROP_PRIVATE_KEY_B58={bool(AIRDROP_PRIVATE_KEY_B58)}"
+        "Missing env vars: SOLANA_RPC / TOKEN_MINT / AIRDROP_PRIVATE_KEY_B58"
     )
 
-client = Client(RPC)
-
 # ========================
-# Constants
+# Solana setup
 # ========================
-TOKEN_2022_PROGRAM_ID = Pubkey.from_string(
-    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-)
-ASSOCIATED_TOKEN_PROGRAM_ID = Pubkey.from_string(
-    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
-)
+client = Client(SOLANA_RPC)
 
 MINT_ADDRESS = Pubkey.from_string(TOKEN_MINT)
 
@@ -58,6 +48,13 @@ airdrop_keypair = Keypair.from_bytes(
     base58.b58decode(AIRDROP_PRIVATE_KEY_B58)
 )
 AIRDROP_PUBKEY = airdrop_keypair.pubkey()
+
+TOKEN_2022_PROGRAM_ID = Pubkey.from_string(
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+)
+ASSOCIATED_TOKEN_PROGRAM_ID = Pubkey.from_string(
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+)
 
 # ========================
 # Models
@@ -89,20 +86,18 @@ async def airdrop(req: WalletRequest):
 
     # Sender ATA must exist
     if client.get_account_info(sender_ata).value is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Airdrop wallet has no token account"
-        )
+        raise HTTPException(status_code=500, detail="Airdrop wallet ATA missing")
 
     # Fetch decimals
-    decimals = client.get_token_supply(MINT_ADDRESS).value.decimals
+    mint_info = client.get_token_supply(MINT_ADDRESS).value
+    decimals = mint_info.decimals
     raw_amount = 1 * (10 ** decimals)
 
     # Check balance
-    balance = int(
+    sender_balance = int(
         client.get_token_account_balance(sender_ata).value.amount
     )
-    if balance < raw_amount:
+    if sender_balance < raw_amount:
         raise HTTPException(status_code=400, detail="Airdrop exhausted")
 
     instructions = []
@@ -154,5 +149,5 @@ async def airdrop(req: WalletRequest):
         "message": "Airdrop successful",
         "wallet": req.wallet,
         "signature": sig,
-        "explorer": f"https://explorer.solana.com/tx/{sig}"
+        "explorer": f"https://explorer.solana.com/tx/{sig}",
     }
