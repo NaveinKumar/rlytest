@@ -1,6 +1,7 @@
 fastapi
 uvicorn
-python-dotenv
 solana
 solders
 base58
+python-dotenv
+firebase-admin
